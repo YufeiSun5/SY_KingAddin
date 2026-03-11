@@ -1,0 +1,30 @@
+# GOKS RestfulAPI 配置文件
+# 此文件与 exe 放在同一目录下，修改后可在界面中热重载生效
+
+[mysql]
+# 数据库连接地址
+host     = "192.168.7.229"
+# 数据库端口
+port     = 3306
+# 数据库名称
+dbname   = "sy"
+# 用户名
+user     = "root"
+# 密码
+password = "123456"
+
+[api]
+# FastAPI 服务绑定 IP（0.0.0.0 表示监听所有网卡）
+host = "0.0.0.0"
+# FastAPI 服务监听端口
+port = 8004
+# 本机对外 IP（SCADA 回调用）
+my_ip = "192.168.7.253"
+
+[scada]
+# SCADA REST 接口根地址
+base_url = "http://192.168.7.229:9433/api/v1"
+# SCADA 登录用户名
+username = "admin"
+# SCADA 登录密码（MD5）
+password = "48D29E9C2707D3966C779A72A7BA06E1"

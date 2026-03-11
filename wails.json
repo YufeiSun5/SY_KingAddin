@@ -1,0 +1,20 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "盛云-王牌插件",
+  "outputfilename": "盛云-王牌插件",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "info": {
+    "companyName": "大连盛云科技",
+    "productName": "盛云-王牌插件",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2026 大连盛云科技",
+    "comments": "盛云-王牌插件 · SCADA 与 MySQL 数据桥接增强工具"
+  },
+  "author": {
+    "name": "孙宇飞",
+    "email": "sunyufei5@live.com"
+  }
+}

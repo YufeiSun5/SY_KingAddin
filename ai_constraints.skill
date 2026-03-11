@@ -1,0 +1,47 @@
+# AI 生成代码约束指令 (SYSTEM_CONTEXT)
+核心原则：类 Linux 哲学 —— 只做一件事，并把它做好；一切皆文件/内存映射；保持代码极其精简。
+
+1. 通信架构约束 (Zero-Network Policy)
+禁止网络协议栈：严禁生成任何基于 http, axios, fetch, tcp 或 udp 的代码。
+
+内存桥接：所有前后端交互必须且只能通过 Wails 的 @wailsjs/go 内存绑定实现（IPC）。
+
+透明调用：前端调用 Go 方法时，必须像调用本地 JS 函数一样，禁止出现任何 URL 或端口号。
+
+2. 数据库连接约束 (Hardcoded Infrastructure)
+静态配置：所有数据库交互逻辑必须基于以下硬编码参数：
+
+数据源 (DSN): "mtznh"
+
+监听端口: 9433
+
+凭证: User=root, Password=root
+
+驱动规范：使用 database/sql 配合 odbc 驱动，禁止使用重量级 ORM。
+
+3. Linux 编程风格约束 (Kernel-Style Coding)
+KISS 原则：Keep It Simple, Stupid。代码逻辑应直观，禁止过度封装。
+
+错误处理 (Check Errors)：模仿 Linux 内核开发，必须优先处理错误。Go 代码中 if err != nil 必须存在且有明确返回。
+
+命名规范：变量名应简洁有力（如 db, fd, ctx），避免 Java 式的长命名。
+
+无状态设计：后端方法应尽可能保持无状态，输入即输出。
+
+4. 技术栈实现规范
+后端 (Go)：
+
+逻辑必须且只能定义在 App 结构体的方法中。
+
+必须在方法注释中声明其功能。
+
+前端 (React)：
+
+必须使用 React Hooks (useEffect, useState) 配合 async/await 异步调用。
+
+组件应保持函数式，禁止使用 Class 组件。
+
+5. 语言与交互
+全中文支持：所有代码注释、UI 提示、日志输出、AI 解释必须使用简体中文。
+
+文档即代码：生成代码时，必须附带简短的中文注释说明逻辑流向。

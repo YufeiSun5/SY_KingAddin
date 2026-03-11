@@ -1,0 +1,9 @@
+SELECT TOP 10 * FROM tag
+
+SELECT TOP 10 * FROM history
+
+SELECT TOP 10 TagName, DataTime, DataValue, DataQuality 
+FROM History 
+WHERE TagName = 'PAC加药机_1#沉淀池1#流量' 
+ORDER BY DataTime DESC
+

@@ -9,10 +9,18 @@ import (
 	"sync"
 )
 
+const legacyDefaultConnName = "229"
+
+type runSQLRequest struct {
+	SQL  string `json:"sql"`
+	Conn string `json:"conn"`
+}
+
 // Manager 管理多个命名数据库连接，每条连接独立 watchdog 断线重连。
 type Manager struct {
 	mu    sync.RWMutex
 	pools map[string]*Pool
+	batch *BatchExecutor // 批量 SQL 执行器（可选，通过 StartBatch 初始化）
 }
 
 // NewManager 根据配置创建多条连接并启动各自的 watchdog。
@@ -68,8 +76,18 @@ func (m *Manager) Reconnect(name string) error {
 	return nil
 }
 
+// StartBatch 初始化批量 SQL 执行器，必须在 NewManager 之后调用。
+func (m *Manager) StartBatch(cfg BatchConfig, dataDir string) {
+	m.batch = NewBatchExecutor(cfg, m, dataDir)
+}
+
 // Close 关闭所有连接并停止所有 watchdog。
+// 批量执行器先于连接池关闭（排空队列需要数据库连接）。
 func (m *Manager) Close() {
+	if m.batch != nil {
+		m.batch.Close()
+		m.batch = nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for name, p := range m.pools {
@@ -113,6 +131,129 @@ func (m *Manager) RegisterRoutes(mux *http.ServeMux, prefix string) {
 	})
 	mux.HandleFunc(prefix+"/run-sql", m.handleRunSQL)
 	mux.HandleFunc(prefix+"/status", m.handleStatus)
+	mux.HandleFunc(prefix+"/batch-exec", m.handleBatchExec)
+	mux.HandleFunc(prefix+"/batch-status", m.handleBatchStatus)
+	mux.HandleFunc(prefix+"/batch-dead", m.handleBatchDead)
+}
+
+// RegisterLegacyRoutes 注册旧版网页仍在使用的兼容数据库路由。
+func (m *Manager) RegisterLegacyRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/sql/run-sql", m.handleRunSQLLegacy)
+}
+
+func decodeRunSQLRequest(r *http.Request) (runSQLRequest, error) {
+	var body runSQLRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.SQL) == "" {
+		return runSQLRequest{}, err
+	}
+	body.SQL = strings.TrimSpace(body.SQL)
+	return body, nil
+}
+
+func isQuerySQL(sqlStr string) bool {
+	upper := strings.ToUpper(sqlStr)
+	return strings.HasPrefix(upper, "SELECT") ||
+		strings.HasPrefix(upper, "WITH") ||
+		strings.HasPrefix(upper, "SHOW") ||
+		strings.HasPrefix(upper, "DESCRIBE") ||
+		strings.HasPrefix(upper, "EXPLAIN")
+}
+
+func (m *Manager) executeRunSQL(connName, sqlStr string) (any, bool, error) {
+	pool := m.poolByName(connName)
+	if pool == nil {
+		return nil, false, ErrNotConnected
+	}
+
+	if pool.IsKH() {
+		result, err := pool.RunKH(sqlStr)
+		return result, true, err
+	}
+
+	if isQuerySQL(sqlStr) {
+		result, err := pool.RunSQL(sqlStr)
+		return result, true, err
+	}
+
+	result, err := pool.ExecSQL(sqlStr)
+	return result, false, err
+}
+
+func logRunSQLResult(connName, sqlStr string, isQuery bool, err error) {
+	if err != nil {
+		if isQuery {
+			log.Printf("[db] 查询失败 [%s]: %v | sql: %s", connName, err, truncateSQL(sqlStr))
+			return
+		}
+		log.Printf("[db] 执行失败 [%s]: %v | sql: %s", connName, err, truncateSQL(sqlStr))
+		return
+	}
+
+	if isQuery {
+		log.Printf("[db] 查询成功 [%s]: %s", connName, truncateSQL(sqlStr))
+		return
+	}
+	log.Printf("[db] 执行成功 [%s]: %s", connName, truncateSQL(sqlStr))
+}
+
+func (m *Manager) resolveLegacyConnName(connName string) string {
+	connName = strings.TrimSpace(connName)
+	if connName != "" {
+		return connName
+	}
+	if m.GetPool(legacyDefaultConnName) != nil {
+		return legacyDefaultConnName
+	}
+	if p := m.defaultPool(); p != nil {
+		return p.Config().Name
+	}
+	return connName
+}
+
+func legacyRunSQLReply(w http.ResponseWriter, result any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	payload := map[string]any{
+		"success": true,
+		"code":    0,
+	}
+
+	switch v := result.(type) {
+	case QueryResult:
+		payload["data"] = v.Rows
+		payload["rows"] = v.Rows
+		payload["columns"] = v.Columns
+		payload["count"] = v.Count
+	case ExecResult:
+		payload["data"] = map[string]any{
+			"affected_rows":  v.AffectedRows,
+			"last_insert_id": v.LastInsertID,
+		}
+		payload["affected_rows"] = v.AffectedRows
+		payload["last_insert_id"] = v.LastInsertID
+		payload["count"] = 0
+	default:
+		payload["data"] = result
+	}
+
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func legacyRunSQLFail(w http.ResponseWriter, errType, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": false,
+		"code":    -1,
+		"message": msg,
+		"error": map[string]string{
+			"errorType": errType,
+			"message":   msg,
+		},
+	})
 }
 
 func (m *Manager) handleRunSQL(w http.ResponseWriter, r *http.Request) {
@@ -124,59 +265,42 @@ func (m *Manager) handleRunSQL(w http.ResponseWriter, r *http.Request) {
 		dbFail(w, "请求方法错误", "仅支持 POST")
 		return
 	}
-	var body struct {
-		SQL  string `json:"sql"`
-		Conn string `json:"conn"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.SQL) == "" {
+	body, err := decodeRunSQLRequest(r)
+	if err != nil {
 		dbFail(w, "请求格式错误", `请求体必须为 {"sql": "SELECT ..."}，可选 "conn": "连接名"`)
 		return
 	}
-	sqlStr := strings.TrimSpace(body.SQL)
-	pool := m.poolByName(body.Conn)
-	if pool == nil {
-		dbFail(w, "数据库未连接", "无可用连接，请检查配置或等待重连")
+	result, isQuery, err := m.executeRunSQL(body.Conn, body.SQL)
+	logRunSQLResult(body.Conn, body.SQL, isQuery, err)
+	if err != nil {
+		dbFail(w, classifyError(err), err.Error())
 		return
 	}
+	dbOK(w, result)
+}
 
-	// KH 工业库模式：整段 SQL 一次发送给驱动，由驱动解析多条语句
-	if pool.IsKH() {
-		result, err := pool.RunKH(sqlStr)
-		if err != nil {
-			log.Printf("[db] KH 查询失败 [%s]: %v | sql: %s", body.Conn, err, truncateSQL(sqlStr))
-			dbFail(w, classifyError(err), err.Error())
-			return
-		}
-		log.Printf("[db] KH 查询成功 [%s]: %s", body.Conn, truncateSQL(sqlStr))
-		dbOK(w, result)
+func (m *Manager) handleRunSQLLegacy(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		corsOK(w)
 		return
 	}
-
-	upper := strings.ToUpper(sqlStr)
-	isQuery := strings.HasPrefix(upper, "SELECT") ||
-		strings.HasPrefix(upper, "WITH") ||
-		strings.HasPrefix(upper, "SHOW") ||
-		strings.HasPrefix(upper, "DESCRIBE") ||
-		strings.HasPrefix(upper, "EXPLAIN")
-	if isQuery {
-		result, err := pool.RunSQL(sqlStr)
-		if err != nil {
-			log.Printf("[db] 查询失败 [%s]: %v | sql: %s", body.Conn, err, truncateSQL(sqlStr))
-			dbFail(w, classifyError(err), err.Error())
-			return
-		}
-		log.Printf("[db] 查询成功 [%s]: %s", body.Conn, truncateSQL(sqlStr))
-		dbOK(w, result)
-	} else {
-		result, err := pool.ExecSQL(sqlStr)
-		if err != nil {
-			log.Printf("[db] 执行失败 [%s]: %v | sql: %s", body.Conn, err, truncateSQL(sqlStr))
-			dbFail(w, classifyError(err), err.Error())
-			return
-		}
-		log.Printf("[db] 执行成功 [%s]，影响行数: %d | sql: %s", body.Conn, result.AffectedRows, truncateSQL(sqlStr))
-		dbOK(w, result)
+	if r.Method != http.MethodPost {
+		legacyRunSQLFail(w, "请求方法错误", "仅支持 POST")
+		return
 	}
+	body, err := decodeRunSQLRequest(r)
+	if err != nil {
+		legacyRunSQLFail(w, "请求格式错误", `请求体必须为 {"sql": "SELECT ..."}，可选 "conn": "连接名"`)
+		return
+	}
+	body.Conn = m.resolveLegacyConnName(body.Conn)
+	result, isQuery, err := m.executeRunSQL(body.Conn, body.SQL)
+	logRunSQLResult(body.Conn, body.SQL, isQuery, err)
+	if err != nil {
+		legacyRunSQLFail(w, classifyError(err), err.Error())
+		return
+	}
+	legacyRunSQLReply(w, result)
 }
 
 func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {

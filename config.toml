@@ -28,3 +28,21 @@ base_url = "http://192.168.7.229:9433/api/v1"
 username = "admin"
 # SCADA 登录密码（MD5）
 password = "48D29E9C2707D3966C779A72A7BA06E1"
+
+[batch]
+# 实时队列容量（满时入队阻塞等待）
+queue_size = 100000
+# 批量刷出间隔（毫秒），到期或达到 flush_batch 条时触发
+flush_interval = 500
+# 每批最大条数
+flush_batch = 50
+# 普通瞬态错误最大重试次数，超过后进入死信队列
+max_retries = 3
+# 死信队列内存保留条数（同时持久化到 JSONL 文件）
+dead_mem_limit = 1000
+# 数据库断连类错误初始退避（毫秒）
+conn_retry_base_interval = 5000
+# 数据库断连类错误最大退避（毫秒）
+conn_retry_max_interval = 300000
+# 重试状态快照落盘间隔（毫秒）
+retry_state_persist_interval = 10000

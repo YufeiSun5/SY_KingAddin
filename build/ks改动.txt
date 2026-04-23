@@ -1,0 +1,4 @@
+
+string sqlStr = "INSERT INTO data_all_test (date,NO,V_A,V_B,V_C,A_A,A_B,A_C) VALUES (NOW(),1,220.1,221.2,219.8,10.5,11.2,10.8)";
+
+string a = RequestJsonInfo2("http://192.168.7.253:8005/api/db/batch-exec", 1, "", "{'conn':'229','sqls':['" + sqlStr + "']}");

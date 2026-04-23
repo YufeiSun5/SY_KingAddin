@@ -1,0 +1,35 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "verify-go-build",
+			"type": "shell",
+			"command": "go",
+			"args": [
+				"build",
+				"./..."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "verify-batch-impl",
+			"type": "shell",
+			"command": "go",
+			"args": [
+				"build",
+				"./..."
+			],
+			"isBackground": false
+		},
+		{
+			"label": "verify-batch-recovery",
+			"type": "shell",
+			"command": "go",
+			"args": [
+				"build",
+				"./..."
+			],
+			"isBackground": false
+		}
+	]
+}

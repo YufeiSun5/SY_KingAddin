@@ -15,7 +15,8 @@ GOKS_restful_API — 运行在 Windows 上的本地插件服务（Wails 桌面�
 |------|------|
 | `app.go` | 装配层：初始化子系统、暴露 IPC、管理热重载 |
 | `scada/` | SCADA 客户端 + Token 管理 + `/api/scada/*` |
-| `db/` | 多数据源连接管理 + SQL 执行 + `/api/db/*` |
+| `db/` | 多数据源连接管理 + SQL 执行 + 批量异步执行 + `/api/db/*` |
+| `db/batch.go` | 批量 SQL 队列：实时队列 → 重试队列 → 死信队列 + WAL 持久化 |
 | `menu/` | LRU 菜单字典 + SCADA 同步 + `/api/menu/*` |
 | `logger/` | 日志中枢：内存 + JSONL 文件 + Wails 事件推送 |
 | `frontend/` | 轻量运维界面：日志、配置、状态、自启管理 |

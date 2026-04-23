@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
+	"time"
 
 	"temp_init/db"
 	"temp_init/logger"
@@ -15,27 +18,32 @@ import (
 	"temp_init/scada"
 
 	"github.com/BurntSushi/toml"
-	"github.com/getlantern/systray"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/energye/systray"
+	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/sys/windows/registry"
 )
+
+//go:embed build/ico.ico
+var trayIconBytes []byte
 
 // App struct
 type App struct {
 	ctx        context.Context
-	configPath string         // 配置文件绝对路径
-	scada      *scada.Client  // SCADA 客户端单例
-	menu       *menu.Manager  // 菜单管理器单例
-	db         *db.Manager    // 多数据库连接管理器
-	httpServer *http.Server   // 对外暴露的 HTTP 插件服务
+	configPath string        // 配置文件绝对路径
+	scada      *scada.Client // SCADA 客户端单例
+	menu       *menu.Manager // 菜单管理器单例
+	db         *db.Manager   // 多数据库连接管理器
+	httpServer *http.Server  // 对外暴露的 HTTP 插件服务
+	trayStop   func()        // 托盘消息循环关闭函数
 }
 
 // AppConfig 对应 config.toml 的完整结构
 type AppConfig struct {
-	MySQL     MysqlConfig      `toml:"mysql"     json:"mysql"`
-	Databases []db.ConnConfig  `toml:"databases" json:"databases"` // 多连接，优先于 mysql
-	API       APIConfig        `toml:"api"       json:"api"`
-	SCADA     ScadaConfig      `toml:"scada"     json:"scada"`
+	MySQL     MysqlConfig     `toml:"mysql"     json:"mysql"`
+	Databases []db.ConnConfig `toml:"databases" json:"databases"` // 多连接，优先于 mysql
+	API       APIConfig       `toml:"api"       json:"api"`
+	SCADA     ScadaConfig     `toml:"scada"     json:"scada"`
+	Batch     db.BatchConfig  `toml:"batch"     json:"batch"` // 批量执行器配置
 }
 
 // MysqlConfig MySQL 连接参数
@@ -95,15 +103,22 @@ func (a *App) startup(ctx context.Context) {
 		log.Printf("✅ 配置加载成功: %s", a.configPath)
 		// 广播配置信息给前端（窗口就绪后前端会收到）
 		go func() {
-			runtime.EventsEmit(a.ctx, "config:loaded", cfg)
+			wruntime.EventsEmit(a.ctx, "config:loaded", cfg)
 		}()
 	}
 
 	// 初始化各子系统
 	a.startSubsystems(cfg)
 
-	// 系统托盘（独立 goroutine，阻塞式运行）
-	go systray.Run(a.onTrayReady, a.onTrayExit)
+	// 托盘在独立 OS 线程中运行完整消息循环，避免 Win10 下长期运行后事件失效
+	a.trayStop = func() {
+		systray.Quit()
+	}
+	go func() {
+		goruntime.LockOSThread()
+		defer goruntime.UnlockOSThread()
+		systray.Run(a.onTrayReady, a.onTrayExit)
+	}()
 }
 
 // startSubsystems 根据配置启动/重启所有子系统
@@ -116,10 +131,22 @@ func (a *App) startSubsystems(cfg *AppConfig) {
 	})
 	a.scada.Start()
 
-	// 首次登录（异步）
+	// 首次登录（异步，带指数退避重试，SCADA 可能延迟上线）
 	go func() {
-		if err := a.scada.Login(false); err != nil {
-			log.Printf("⚠️ 首次 SCADA 登录失败: %v", err)
+		backoff := 2 * time.Second
+		const maxBackoff = 1 * time.Minute
+		for {
+			if err := a.scada.Login(true); err != nil {
+				log.Printf("⚠️ SCADA 登录失败，%s 后重试: %v", backoff, err)
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+			log.Println("✅ SCADA 首次登录成功")
+			return
 		}
 	}()
 
@@ -132,11 +159,16 @@ func (a *App) startSubsystems(cfg *AppConfig) {
 	dbConfigs := dbConnConfigs(cfg)
 	a.db = db.NewManager(dbConfigs)
 
+	// 初始化批量 SQL 执行器（WAL 和死信文件存放在 exe 同级 batch-data/ 目录）
+	batchDir := filepath.Join(filepath.Dir(a.configPath), "batch-data")
+	a.db.StartBatch(cfg.Batch, batchDir)
+
 	// 构建 HTTP 路由
 	mux := http.NewServeMux()
 	a.scada.RegisterRoutes(mux, "/api/scada")
 	a.menu.RegisterRoutes(mux, "/api/menu")
 	a.db.RegisterRoutes(mux, "/api/db")
+	a.db.RegisterLegacyRoutes(mux)
 
 	port := ":" + strconv.Itoa(cfg.API.Port)
 	addr := cfg.API.MyIP + ":" + strconv.Itoa(cfg.API.Port)
@@ -151,33 +183,55 @@ func (a *App) startSubsystems(cfg *AppConfig) {
 
 // onTrayReady 初始化托盘图标和菜单
 func (a *App) onTrayReady() {
-	systray.SetTitle("GOKS")
-	systray.SetTooltip("GOKS 插件服务运行中")
+	systray.SetIcon(trayIconBytes)
+	systray.SetTitle("盛云王牌插件")
+	systray.SetTooltip("盛云王牌插件 · 服务运行中")
+	log.Printf("[tray] 托盘已初始化")
+
+	// 左键单击显示窗口
+	systray.SetOnClick(func(menu systray.IMenu) {
+		log.Printf("[tray] 左键点击")
+		wruntime.WindowUnminimise(a.ctx)
+		wruntime.WindowShow(a.ctx)
+		wruntime.WindowCenter(a.ctx)
+	})
+	// 右键弹出菜单（energye/systray 需要手动调用 ShowMenu）
+	systray.SetOnRClick(func(menu systray.IMenu) {
+		log.Printf("[tray] 右键点击")
+		if err := menu.ShowMenu(); err != nil {
+			log.Printf("[tray] 右键弹菜单失败: %v", err)
+		}
+	})
 
 	mShow := systray.AddMenuItem("显示窗口", "打开日志窗口")
 	systray.AddSeparator()
-	mQuit := systray.AddMenuItem("退出 GOKS", "彻底退出程序")
+	mQuit := systray.AddMenuItem("退出", "彻底退出程序")
 
-	go func() {
-		for {
-			select {
-			case <-mShow.ClickedCh:
-				runtime.WindowShow(a.ctx)
-			case <-mQuit.ClickedCh:
-				systray.Quit()
-				runtime.Quit(a.ctx)
-				return
-			}
-		}
-	}()
+	mShow.Click(func() {
+		log.Printf("[tray] 菜单: 显示窗口")
+		wruntime.WindowUnminimise(a.ctx)
+		wruntime.WindowShow(a.ctx)
+		wruntime.WindowCenter(a.ctx)
+	})
+	mQuit.Click(func() {
+		log.Printf("[tray] 菜单: 退出")
+		systray.Quit()
+		wruntime.Quit(a.ctx)
+	})
 }
 
 // onTrayExit 托盘退出时的清理回调
-func (a *App) onTrayExit() {}
+func (a *App) onTrayExit() {
+	log.Printf("[tray] 托盘消息循环已退出")
+}
 
 // shutdown 在窗口关闭时调用
 func (a *App) shutdown(ctx context.Context) {
 	log.Printf("🔌 正在关闭服务...")
+	if a.trayStop != nil {
+		a.trayStop()
+		a.trayStop = nil
+	}
 	if a.httpServer != nil {
 		_ = a.httpServer.Shutdown(ctx)
 	}
@@ -290,7 +344,7 @@ func (a *App) ApplyConfig(cfg AppConfig) error {
 	a.startSubsystems(&cfg)
 	log.Printf("✅ 配置已热重载")
 	// 4. 广播新配置给前端
-	runtime.EventsEmit(a.ctx, "config:loaded", &cfg)
+	wruntime.EventsEmit(a.ctx, "config:loaded", &cfg)
 	return nil
 }
 

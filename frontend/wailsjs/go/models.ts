@@ -1,5 +1,31 @@
 export namespace db {
 	
+	export class BatchConfig {
+	    queue_size: number;
+	    flush_interval: number;
+	    flush_batch: number;
+	    max_retries: number;
+	    dead_mem_limit: number;
+	    conn_retry_base_interval: number;
+	    conn_retry_max_interval: number;
+	    retry_state_persist_interval: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new BatchConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.queue_size = source["queue_size"];
+	        this.flush_interval = source["flush_interval"];
+	        this.flush_batch = source["flush_batch"];
+	        this.max_retries = source["max_retries"];
+	        this.dead_mem_limit = source["dead_mem_limit"];
+	        this.conn_retry_base_interval = source["conn_retry_base_interval"];
+	        this.conn_retry_max_interval = source["conn_retry_max_interval"];
+	        this.retry_state_persist_interval = source["retry_state_persist_interval"];
+	    }
+	}
 	export class ConnConfig {
 	    name: string;
 	    type: string;
@@ -133,6 +159,7 @@ export namespace main {
 	    databases: db.ConnConfig[];
 	    api: APIConfig;
 	    scada: ScadaConfig;
+	    batch: db.BatchConfig;
 	
 	    static createFrom(source: any = {}) {
 	        return new AppConfig(source);
@@ -144,6 +171,7 @@ export namespace main {
 	        this.databases = this.convertValues(source["databases"], db.ConnConfig);
 	        this.api = this.convertValues(source["api"], APIConfig);
 	        this.scada = this.convertValues(source["scada"], ScadaConfig);
+	        this.batch = this.convertValues(source["batch"], db.BatchConfig);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -13,6 +13,7 @@ const SOURCE_BG = {
   http:  '#1a0d1a',
   app:   '#1a1a0d',
   db:    '#1a0d0d',
+  batch: '#1a1a0d',
 };
 
 const LEVEL_COLOR = {
@@ -27,6 +28,7 @@ const SOURCE_TAG_COLOR = {
   http:  '#9c27b0',
   app:   '#ff9800',
   db:    '#f44336',
+  batch: '#ff9800',
 };
 
 // ── 通用输入框样式 ───────────────────────────────────────────────────────────
@@ -43,11 +45,21 @@ const inputStyle = {
   boxSizing: 'border-box',
 };
 
-// 从 db 类日志消息中解析连接名（如 "[主库]"）
+// 从 db/batch 类日志消息中解析连接名
+// db 日志格式: "[db] ... [连接名] ..."
+// batch 日志格式: "[batch:连接名] ..."
 function parseDbConnFromMessage(message) {
   if (typeof message !== 'string') return null;
-  const m = message.match(/\[([^\]]+)\]/);
-  return m ? m[1] : null;
+  // 优先匹配 [batch:xxx] 格式
+  const bm = message.match(/\[batch:([^\]]+)\]/);
+  if (bm) return bm[1];
+  // 匹配 [xxx] 格式（跳过 [db]、[batch] 等固定标签）
+  const all = message.matchAll(/\[([^\]]+)\]/g);
+  for (const m of all) {
+    const tag = m[1].toLowerCase();
+    if (tag !== 'db' && tag !== 'batch' && !tag.startsWith('batch:')) return m[1];
+  }
+  return null;
 }
 
 // 按连接名生成稳定颜色（用于数据源分类显示）
@@ -61,6 +73,7 @@ function connColor(connName) {
 // ── 单条日志行 ───────────────────────────────────────────────────────────────
 
 function LogLine({ entry, index }) {
+  const [copied, setCopied] = useState(false);
   const bg = SOURCE_BG[entry.source] || '#111';
   const bgAlt = bg.replace(/#(\w{2})(\w{2})(\w{2})/, (_, r, g, b) => {
     const dim = (hex) => Math.max(0, parseInt(hex, 16) - 6).toString(16).padStart(2, '0');
@@ -68,7 +81,14 @@ function LogLine({ entry, index }) {
   });
   const fg = LEVEL_COLOR[entry.level] || '#e0e0e0';
   const tagColor = SOURCE_TAG_COLOR[entry.source] || '#888';
-  const dbConn = entry.source === 'db' ? parseDbConnFromMessage(entry.message) : null;
+  const dbConn = (entry.source === 'db' || entry.source === 'batch') ? parseDbConnFromMessage(entry.message) : null;
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(entry.message).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  };
 
   return (
     <div style={{
@@ -97,7 +117,18 @@ function LogLine({ entry, index }) {
           {dbConn}
         </span>
       )}
-      <span style={{ color: fg, wordBreak: 'break-all' }}>{entry.message}</span>
+      <span style={{ color: fg, wordBreak: 'break-all', flex: 1 }}>{entry.message}</span>
+      <span
+        onClick={handleCopy}
+        title="复制此行"
+        style={{
+          flexShrink: 0, cursor: 'pointer', fontSize: '11px', padding: '0 4px',
+          color: copied ? '#4caf50' : '#444', userSelect: 'none',
+          transition: 'color 0.2s',
+        }}
+      >
+        {copied ? '✓' : '⎘'}
+      </span>
     </div>
   );
 }
@@ -604,7 +635,7 @@ function StatusBar({ count, connected, tokenPreview, dbConnections, autoScroll, 
 // ── 过滤栏 ───────────────────────────────────────────────────────────────────
 
 const LEVELS = ['all', 'info', 'warn', 'error'];
-const SOURCES = ['all', 'scada', 'menu', 'http', 'app', 'db'];
+const SOURCES = ['all', 'scada', 'menu', 'http', 'app', 'db', 'batch'];
 
 function FilterBar({ level, source, keyword, dataSource, dbConnections, onLevel, onSource, onKeyword, onDataSource }) {
   const btnStyle = (active) => ({
@@ -640,7 +671,7 @@ function FilterBar({ level, source, keyword, dataSource, dbConnections, onLevel,
           {s.toUpperCase()}
         </button>
       ))}
-      {source === 'db' && dbConnections && dbConnections.length > 0 && (
+      {(source === 'db' || source === 'batch') && dbConnections && dbConnections.length > 0 && (
         <>
           <span style={{ color: '#222' }}>|</span>
           <span style={{ color: '#444', fontSize: '11px' }}>数据源:</span>
@@ -736,9 +767,11 @@ export default function LogWindow() {
   const filtered = entries.filter(e => {
     if (filterLevel !== 'all' && e.level !== filterLevel) return false;
     if (filterSource !== 'all' && e.source !== filterSource) return false;
-    if (filterSource === 'db' && filterDataSource && e.source === 'db') {
-      const conn = parseDbConnFromMessage(e.message);
-      if (conn !== filterDataSource) return false;
+    if ((filterSource === 'db' || filterSource === 'batch') && filterDataSource) {
+      if (e.source === filterSource) {
+        const conn = parseDbConnFromMessage(e.message);
+        if (conn !== filterDataSource) return false;
+      }
     }
     if (keyword && !e.message.toLowerCase().includes(keyword.toLowerCase())) return false;
     return true;

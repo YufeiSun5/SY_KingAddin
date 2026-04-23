@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>批量SQL测试 - 300条</title>
+<style>
+  body { font-family: Consolas, monospace; background: #0d0d0d; color: #ccc; padding: 20px; }
+  button { padding: 8px 20px; margin: 5px; font-size: 14px; cursor: pointer; border: 1px solid #444; border-radius: 4px; }
+  .btn-send { background: #1a3a1a; color: #4caf50; border-color: #4caf50; }
+  .btn-status { background: #1a1a3a; color: #2196f3; border-color: #2196f3; }
+  .btn-dead { background: #3a1a1a; color: #f44336; border-color: #f44336; }
+  pre { background: #111; border: 1px solid #222; padding: 12px; border-radius: 4px; max-height: 400px; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+  .info { color: #888; font-size: 12px; margin: 8px 0; }
+  input { background: #111; border: 1px solid #333; color: #ccc; padding: 6px 10px; border-radius: 4px; font-size: 13px; width: 300px; }
+  label { color: #888; font-size: 12px; margin-right: 8px; }
+</style>
+</head>
+<body>
+<h2>⚡ 批量 SQL 执行器测试</h2>
+
+<div>
+  <label>API 地址:</label>
+  <input id="host" value="http://localhost:8005" />
+  <label style="margin-left:12px">连接名:</label>
+  <input id="conn" value="229" style="width:80px" />
+</div>
+
+<div style="margin-top: 12px;">
+  <button class="btn-send" onclick="send300()">🚀 发送 300 条 INSERT</button>
+  <button class="btn-send" onclick="sendBadSQL()">💀 发送 1 条错误 SQL（测试死信）</button>
+  <button class="btn-status" onclick="getStatus()">📊 查看队列状态</button>
+  <button class="btn-dead" onclick="getDead()">🗑️ 查看死信队列</button>
+</div>
+
+<div class="info" id="info"></div>
+<pre id="output">点击按钮开始测试...</pre>
+
+<script>
+function apiBase() { return document.getElementById('host').value.replace(/\/+$/, ''); }
+function connName() { return document.getElementById('conn').value; }
+function log(msg) {
+  const el = document.getElementById('output');
+  el.textContent = typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2);
+}
+function info(msg) { document.getElementById('info').textContent = msg; }
+
+// 生成随机电力数据 INSERT
+function genSQL(index) {
+  const no = 1 + (index % 50); // 仪表编号 1~50
+  const r = (min, max, dec) => (min + Math.random() * (max - min)).toFixed(dec);
+  const va = r(210, 230, 1), vb = r(210, 230, 1), vc = r(210, 230, 1);
+  const aa = r(5, 20, 1), ab = r(5, 20, 1), ac = r(5, 20, 1);
+  const vab = r(370, 400, 1), vbc = r(370, 400, 1), vac = r(370, 400, 1);
+  const qabc = r(50, 150, 2), pabc = r(100, 300, 2), sabc = r(150, 350, 2);
+  const cos = r(0.8, 0.99, 3), kwh = r(100, 9999, 1), hz = r(49.8, 50.2, 1);
+  const aaMax = r(15, 25, 1), aaMin = r(2, 8, 1);
+  const abMax = r(15, 25, 1), abMin = r(2, 8, 1);
+  const acMax = r(15, 25, 1), acMin = r(2, 8, 1);
+  const pMax = r(250, 400, 2), pMin = r(50, 150, 2);
+  return `INSERT INTO data_all_test (date,NO,V_A,V_B,V_C,A_A,A_B,A_C,V_AB,V_BC,V_AC,Q_ABC,P_ABC,S_ABC,COS,KWH,Hz,A_A_MAX,A_A_MIN,A_B_MAX,A_B_MIN,A_C_MAX,A_C_MIN,P_ABC_MAX,P_ABC_MIN) VALUES (NOW(),${no},${va},${vb},${vc},${aa},${ab},${ac},${vab},${vbc},${vac},${qabc},${pabc},${sabc},${cos},${kwh},${hz},${aaMax},${aaMin},${abMax},${abMin},${acMax},${acMin},${pMax},${pMin})`;
+}
+
+async function send300() {
+  const sqls = [];
+  for (let i = 0; i < 300; i++) sqls.push(genSQL(i));
+  info(`正在发送 300 条 INSERT 到连接 [${connName()}]...`);
+  log('发送中...');
+  const t0 = performance.now();
+  try {
+    const resp = await fetch(apiBase() + '/api/db/batch-exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conn: connName(), sqls }),
+    });
+    const data = await resp.json();
+    const ms = (performance.now() - t0).toFixed(1);
+    info(`✅ 完成！耗时 ${ms}ms（仅入队时间，后台异步执行）`);
+    log(data);
+  } catch (e) {
+    info('❌ 请求失败');
+    log('错误: ' + e.message);
+  }
+}
+
+async function sendBadSQL() {
+  info('发送 1 条语法错误 SQL...');
+  try {
+    const resp = await fetch(apiBase() + '/api/db/batch-exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conn: connName(), sqls: ['INSERT INTO 不存在的表 VALUES (1)'] }),
+    });
+    const data = await resp.json();
+    info('已入队，等待执行后进入死信队列');
+    log(data);
+  } catch (e) {
+    info('❌ 请求失败');
+    log('错误: ' + e.message);
+  }
+}
+
+async function getStatus() {
+  info('查询队列状态...');
+  try {
+    const resp = await fetch(apiBase() + '/api/db/batch-status');
+    const data = await resp.json();
+    info('队列状态已刷新');
+    log(data);
+  } catch (e) {
+    info('❌ 请求失败');
+    log('错误: ' + e.message);
+  }
+}
+
+async function getDead() {
+  info('查询死信队列...');
+  try {
+    const resp = await fetch(apiBase() + '/api/db/batch-dead?conn=' + connName());
+    const data = await resp.json();
+    info('死信队列已刷新');
+    log(data);
+  } catch (e) {
+    info('❌ 请求失败');
+    log('错误: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

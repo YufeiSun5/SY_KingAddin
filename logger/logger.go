@@ -31,7 +31,7 @@ const (
 
 // Entry 单条日志记录
 type Entry struct {
-	Time    string `json:"time"`    // "15:04:05.000"
+	Time    string `json:"time"`    // "01-02 15:04:05"
 	Level   Level  `json:"level"`   // info / warn / error
 	Source  string `json:"source"`  // 来源标签，如 "scada" "menu" "app"
 	Message string `json:"message"` // 正文
@@ -40,7 +40,7 @@ type Entry struct {
 // ── 常量 ─────────────────────────────────────────────────────────────────────
 
 const (
-	maxMemEntries = 2000            // 内存最多保留条数
+	maxMemEntries = 2000           // 内存最多保留条数
 	keepDuration  = 48 * time.Hour // 持久化保留时长
 	eventName     = "log:entry"    // Wails 前端事件名
 )
@@ -113,7 +113,7 @@ func (h *Hub) ingest(raw string) {
 	}
 
 	e := Entry{
-		Time:    time.Now().Format("15:04:05.000"),
+		Time:    time.Now().Format("01-02 15:04:05"),
 		Level:   parseLevel(raw),
 		Source:  parseSource(raw),
 		Message: raw,
@@ -155,11 +155,12 @@ var sourceKeywords = []struct {
 	tag      string
 	keywords []string
 }{
-	{"db",    []string{"[db]", "mysql", "连接池"}},
+	{"batch", []string{"[batch:", "[batch-", "batch-wal", "batch-dead", "[batch]", "批量执行"}},
+	{"db", []string{"[db]", "mysql", "连接池"}},
 	{"scada", []string{"scada", "token", "gettoken", "deltoken", "realtdata", "getvariable", "writevariable"}},
-	{"menu",  []string{"menu", "lru", "菜单"}},
-	{"http",  []string{"http", "/api/", "listen"}},
-	{"app",   []string{"startup", "shutdown", "config", "配置"}},
+	{"menu", []string{"menu", "lru", "菜单"}},
+	{"http", []string{"http", "/api/", "listen"}},
+	{"app", []string{"startup", "shutdown", "config", "配置"}},
 }
 
 func parseSource(s string) string {
@@ -203,14 +204,25 @@ func (h *Hub) writeFile(e Entry) {
 // loadHistory 读取过去 48h 内的 JSONL 文件，加载到内存。
 func (h *Hub) loadHistory() {
 	cutoff := time.Now().Add(-keepDuration)
-	for d := 0; d <= 2; d++ {
+	for d := 2; d >= 0; d-- {
 		day := time.Now().AddDate(0, 0, -d)
 		if day.Before(cutoff) {
-			break
+			continue
 		}
 		name := h.logFileName(day)
 		h.loadFile(name, cutoff)
 	}
+}
+
+func parseStoredTime(fileDate, stored string, loc *time.Location) (time.Time, error) {
+	if strings.Contains(stored, "-") {
+		parts := strings.SplitN(stored, " ", 2)
+		if len(parts) != 2 {
+			return time.Time{}, fmt.Errorf("invalid dated time: %s", stored)
+		}
+		return time.ParseInLocation("2006-01-02 15:04:05", fileDate+" "+parts[1], loc)
+	}
+	return time.ParseInLocation("2006-01-02 15:04:05.000", fileDate+" "+stored, loc)
 }
 
 func (h *Hub) loadFile(name string, cutoff time.Time) {
@@ -220,16 +232,17 @@ func (h *Hub) loadFile(name string, cutoff time.Time) {
 	}
 	defer f.Close()
 
-	today := time.Now().Format("2006-01-02")
+	// 从文件名提取日期，用于兼容旧格式条目
+	base := filepath.Base(name)
+	fileDate := strings.TrimSuffix(strings.TrimPrefix(base, "goks-"), ".jsonl")
+	loc := time.Now().Location()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		var e Entry
 		if json.Unmarshal(sc.Bytes(), &e) != nil {
 			continue
 		}
-		// 用文件日期 + 条目时间重建完整时间
-		full := today + " " + e.Time
-		t, err := time.Parse("2006-01-02 15:04:05.000", full)
+		t, err := parseStoredTime(fileDate, e.Time, loc)
 		if err != nil || t.Before(cutoff) {
 			continue
 		}
